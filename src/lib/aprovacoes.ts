@@ -80,6 +80,11 @@ export async function listarStatusCotacoes(): Promise<StatusCotacao[]> {
 }
 
 
+export async function limparTodasSubmissoes() {
+  const { error } = await supabase.from("cotacoes_aprovacao").delete().not("id", "is", null);
+  if (error) throw error;
+}
+
 export async function decidirSubmissao(id: string, status: SubmissaoStatus) {
   const { data: userData } = await supabase.auth.getUser();
   const { error } = await supabase

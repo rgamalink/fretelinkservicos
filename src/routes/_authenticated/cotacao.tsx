@@ -2,13 +2,14 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Check, ClipboardList, LogOut, Plus, Save, Send, Trash2, UserCheck, X } from "lucide-react";
+import { Check, ClipboardList, Eraser, LogOut, Plus, Save, Send, Trash2, UserCheck, X } from "lucide-react";
 import { decidirAcesso, listarUsuarios, type UsuarioAcesso } from "@/lib/acessos";
 
 import { supabase } from "@/integrations/supabase/client";
 import {
   APPROVER_EMAIL,
   decidirSubmissao,
+  limparTodasSubmissoes,
   listarStatusCotacoes,
   listarSubmissoes,
   submeterAprovacao,
@@ -480,6 +481,29 @@ function Index() {
       },
     });
 
+  const limparTudo = () =>
+    setConfirm({
+      msg: "Isso vai apagar TODAS as cotações salvas (localStorage) e TODAS as submissões de aprovação (banco, de todos os usuários). Essa ação não pode ser desfeita. Deseja continuar?",
+      action: () => {
+        void (async () => {
+          try {
+            await limparTodasSubmissoes();
+            setCotacoes([]);
+            localStorage.removeItem("cotacoes_submetidas");
+            setLista([]);
+            setSubmetidas({});
+            setSelecionados({});
+            setDecisaoUI({});
+            setIdAtual(undefined);
+            await carregarSubmissoes();
+            toast.success("Todas as cotações foram apagadas.");
+          } catch {
+            toast.error("Não foi possível apagar as cotações submetidas.");
+          }
+        })();
+      },
+    });
+
   const filtrada = useMemo(
     () =>
       lista.filter((item) => {
@@ -753,6 +777,14 @@ function Index() {
                       {usuariosPendentes}
                     </span>
                   )}
+                </button>
+                <button
+                  type="button"
+                  onClick={limparTudo}
+                  className="rounded-[7px] border border-danger bg-panel px-4 py-2.5 text-[13px] font-bold text-danger transition-colors hover:bg-danger hover:text-primary-foreground"
+                >
+                  <Eraser className="mr-2 inline h-4 w-4 align-[-3px]" />
+                  Limpar Tudo
                 </button>
               </>
             )}
