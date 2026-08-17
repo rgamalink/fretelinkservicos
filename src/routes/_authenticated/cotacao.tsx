@@ -2,13 +2,14 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Check, ClipboardList, LogOut, Plus, Save, Send, Trash2, UserCheck, X } from "lucide-react";
+import { Check, ClipboardList, Eraser, LogOut, Plus, Save, Send, Trash2, UserCheck, X } from "lucide-react";
 import { decidirAcesso, listarUsuarios, type UsuarioAcesso } from "@/lib/acessos";
 
 import { supabase } from "@/integrations/supabase/client";
 import {
   APPROVER_EMAIL,
   decidirSubmissao,
+  limparTodasSubmissoes,
   listarStatusCotacoes,
   listarSubmissoes,
   submeterAprovacao,
@@ -102,6 +103,9 @@ function Index() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [gerais, setGerais] = useState<DadosGerais>(geraisVazio);
+  // id local da cotação atualmente carregada/salva no painel principal, usado
+  // como ref_local para que o status seja o mesmo em todas as telas.
+  const [idAtual, setIdAtual] = useState<string | undefined>(undefined);
 
   async function sair() {
     await queryClient.cancelQueries();
@@ -182,6 +186,20 @@ function Index() {
 
   }, []);
 
+  // Replica em tempo real, em todas as telas abertas, qualquer decisão de
+  // aprovação/reprovação registrada por outro usuário (ex.: rodrigo.gama@linkbr.com).
+  useEffect(() => {
+    const channel = supabase
+      .channel("cotacoes_status_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "cotacoes_status" }, () => {
+        void carregarSubmissoes();
+      })
+      .subscribe();
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
   const carregarSubmissoes = async () => {
     try {
       setSubmissoes(await listarSubmissoes());
@@ -198,31 +216,68 @@ function Index() {
   const chaveSub = (cliente: string, origem: string, destino: string) =>
     `${(cliente || "").trim().toLowerCase()}|${(origem || "").trim().toLowerCase()}|${(destino || "").trim().toLowerCase()}`;
 
-  // Baseado em statusGeral (visível a todos os usuários) para que a decisão do
-  // aprovador em uma cotação submetida por outra pessoa também apareça aqui.
-  // Uma decisão (aprovada/reprovada) sempre prevalece sobre linhas pendentes da
-  // mesma cotação, e entre decisões vale a mais recente (decided_at).
-  const statusPorCotacao = useMemo(() => {
+  // Agrega o status mais atual (statusGeral) para um agrupador (id local ou
+  // chave textual cliente|origem|destino). Uma decisão (aprovada/reprovada)
+  // sempre prevalece sobre linhas pendentes do mesmo agrupador, e entre
+  // decisões vale a mais recente (decided_at).
+  const agregarStatus = (itens: { chave: string; status: string; decided_at: string | null }[]) => {
     const map: Record<string, { status: string; decidedAt: number }> = {};
-    for (const s of statusGeral) {
-      const chave = chaveSub(s.cliente, s.origem, s.destino);
+    for (const s of itens) {
       const decidida = s.status === "aprovada" || s.status === "reprovada";
       const decidedAt = s.decided_at ? new Date(s.decided_at).getTime() : 0;
-      const atual = map[chave];
+      const atual = map[s.chave];
       if (!atual) {
-        map[chave] = { status: s.status, decidedAt };
+        map[s.chave] = { status: s.status, decidedAt };
         continue;
       }
-      const atualDecidida =
-        atual.status === "aprovada" || atual.status === "reprovada";
+      const atualDecidida = atual.status === "aprovada" || atual.status === "reprovada";
       if (decidida && (!atualDecidida || decidedAt > atual.decidedAt)) {
-        map[chave] = { status: s.status, decidedAt };
+        map[s.chave] = { status: s.status, decidedAt };
       }
     }
     return Object.fromEntries(
       Object.entries(map).map(([k, v]) => [k, v.status]),
     ) as Record<string, string>;
-  }, [statusGeral]);
+  };
+
+  // Baseado em statusGeral (visível a todos os usuários) para que a decisão do
+  // aprovador em uma cotação submetida por outra pessoa também apareça aqui.
+  const statusPorCotacao = useMemo(
+    () =>
+      agregarStatus(
+        statusGeral.map((s) => ({
+          chave: chaveSub(s.cliente, s.origem, s.destino),
+          status: s.status,
+          decided_at: s.decided_at,
+        })),
+      ),
+    [statusGeral],
+  );
+
+  // Casamento pelo id local da cotação (ref_local), que identifica de forma
+  // unívoca a cotação salva independentemente de haver outras com o mesmo
+  // cliente/origem/destino.
+  const statusPorRefLocal = useMemo(
+    () =>
+      agregarStatus(
+        statusGeral
+          .filter((s): s is StatusCotacao & { ref_local: string } => !!s.ref_local)
+          .map((s) => ({ chave: s.ref_local, status: s.status, decided_at: s.decided_at })),
+      ),
+    [statusGeral],
+  );
+
+  // Resolve o status de uma cotação: prioriza o id local (ref_local), que é
+  // o mesmo em todas as telas que exibem essa cotação, e só recorre à chave
+  // textual cliente/origem/destino como fallback para registros legados.
+  const statusDe = (id: string | undefined, cliente: string, origem: string, destino: string) => {
+    if (id) {
+      const porId = decisaoUI[id] ?? statusPorRefLocal[id];
+      if (porId) return porId;
+    }
+    const chave = chaveSub(cliente, origem, destino);
+    return decisaoUI[chave] ?? statusPorCotacao[chave] ?? "pendente";
+  };
 
 
   // Decisões tomadas nesta sessão (para marca d'água nos botões clicados)
@@ -245,7 +300,7 @@ function Index() {
     }
     setEnviando(true);
     try {
-      await submeterAprovacao(g, c, "pendente");
+      await submeterAprovacao(g, c, "pendente", cotacaoId);
       if (isApprover && !cotacaoId) salvarCotacao(g, c);
       setSubmetidas((prev) => ({ ...prev, [chave]: true }));
       toast.success(
@@ -276,7 +331,7 @@ function Index() {
       for (const item of itens) {
         if (!item.gerais.cliente.trim()) continue;
         try {
-          await submeterAprovacao(item.gerais, item.cards, "pendente");
+          await submeterAprovacao(item.gerais, item.cards, "pendente", item.id);
           setSubmetidas((prev) => ({ ...prev, [item.id]: true }));
           ok++;
         } catch {
@@ -308,6 +363,7 @@ function Index() {
         ...prev,
         [s.id]: status,
         [chaveSub(s.cliente, s.origem, s.destino)]: status,
+        ...(s.ref_local ? { [s.ref_local]: status } : {}),
       }));
       toast.success(status === "aprovada" ? "Cotação aprovada." : "Cotação reprovada.");
       await carregarSubmissoes();
@@ -321,6 +377,7 @@ function Index() {
     g: DadosGerais,
     c: Record<number, DadosCard>,
     status: "aprovada" | "reprovada",
+    refLocal?: string,
   ) => {
     if (!g.cliente.trim()) {
       toast.warning("Informe o Nome do Cliente antes de decidir.");
@@ -329,15 +386,19 @@ function Index() {
     setEnviando(true);
     try {
       const chave = chaveSub(g.cliente, g.origem, g.destino);
-      const existente = submissoes.find(
-        (s) => chaveSub(s.cliente, s.origem, s.destino) === chave,
-      );
+      const existente =
+        (refLocal && submissoes.find((s) => s.ref_local === refLocal)) ||
+        submissoes.find((s) => chaveSub(s.cliente, s.origem, s.destino) === chave);
       if (existente) {
         await decidirSubmissao(existente.id, status);
       } else {
-        await submeterAprovacao(g, c, status);
+        await submeterAprovacao(g, c, status, refLocal);
       }
-      setDecisaoUI((prev) => ({ ...prev, [chave]: status }));
+      setDecisaoUI((prev) => ({
+        ...prev,
+        [chave]: status,
+        ...(refLocal ? { [refLocal]: status } : {}),
+      }));
       toast.success(status === "aprovada" ? "Cotação aprovada." : "Cotação reprovada.");
       await carregarSubmissoes();
     } catch {
@@ -364,6 +425,7 @@ function Index() {
     const atual = [nova, ...getCotacoes()];
     if (setCotacoes(atual)) {
       setLista(atual);
+      setIdAtual(nova.id);
       return true;
     }
     return false;
@@ -388,6 +450,7 @@ function Index() {
       action: () => {
         setGerais(geraisVazio());
         setCards(cardsVazios());
+        setIdAtual(undefined);
         toast.success("Nova cotação pronta para preenchimento.");
       },
     });
@@ -399,6 +462,7 @@ function Index() {
         EIXOS_LIST.map((e) => [e, { ...cardVazio(), ...(c.cards[e] ?? {}) }]),
       ),
     );
+    setIdAtual(c.id);
     setModalOpen(false);
     toast.success("Cotação carregada.");
   };
@@ -414,6 +478,29 @@ function Index() {
         } else {
           toast.error("Não foi possível apagar a cotação.");
         }
+      },
+    });
+
+  const limparTudo = () =>
+    setConfirm({
+      msg: "Isso vai apagar TODAS as cotações salvas (localStorage) e TODAS as submissões de aprovação (banco, de todos os usuários). Essa ação não pode ser desfeita. Deseja continuar?",
+      action: () => {
+        void (async () => {
+          try {
+            await limparTodasSubmissoes();
+            setCotacoes([]);
+            localStorage.removeItem("cotacoes_submetidas");
+            setLista([]);
+            setSubmetidas({});
+            setSelecionados({});
+            setDecisaoUI({});
+            setIdAtual(undefined);
+            await carregarSubmissoes();
+            toast.success("Todas as cotações foram apagadas.");
+          } catch {
+            toast.error("Não foi possível apagar as cotações submetidas.");
+          }
+        })();
       },
     });
 
@@ -633,19 +720,19 @@ function Index() {
               <ClipboardList className="mr-2 inline h-4 w-4 align-[-3px]" />Ver Cotações
             </button>
             {(() => {
-              const chave = `atual:${gerais.cliente}|${gerais.origem}|${gerais.destino}`;
+              const chave = idAtual ?? `atual:${gerais.cliente}|${gerais.origem}|${gerais.destino}`;
               const jaEnviada = !isApprover && submetidas[chave] === true;
-              const chaveA = chaveSub(gerais.cliente, gerais.origem, gerais.destino);
               const aprovada =
-                isApprover && (decisaoUI[chaveA] ?? statusPorCotacao[chaveA]) === "aprovada";
+                isApprover &&
+                statusDe(idAtual, gerais.cliente, gerais.origem, gerais.destino) === "aprovada";
               return (
                 <button
                   type="button"
                   disabled={enviando || jaEnviada}
                   onClick={() =>
                     isApprover
-                      ? decidirLocal(gerais, cards, "aprovada")
-                      : submeter(gerais, cards, chave)
+                      ? decidirLocal(gerais, cards, "aprovada", idAtual)
+                      : submeter(gerais, cards, chave, idAtual)
                   }
                   className={`rounded-[7px] border border-navy bg-panel px-4 py-2.5 text-[13px] font-bold text-navy transition-colors hover:bg-navy hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60 ${marcaDagua(aprovada)}`}
                 >
@@ -690,6 +777,14 @@ function Index() {
                       {usuariosPendentes}
                     </span>
                   )}
+                </button>
+                <button
+                  type="button"
+                  onClick={limparTudo}
+                  className="rounded-[7px] border border-danger bg-panel px-4 py-2.5 text-[13px] font-bold text-danger transition-colors hover:bg-danger hover:text-primary-foreground"
+                >
+                  <Eraser className="mr-2 inline h-4 w-4 align-[-3px]" />
+                  Limpar Tudo
                 </button>
               </>
             )}
@@ -885,13 +980,12 @@ function Index() {
 
                 <tbody>
                   {filtrada.map((item) => {
-                    const chaveItem = chaveSub(
+                    const statusCotacao = statusDe(
+                      item.id,
                       item.gerais.cliente,
                       item.gerais.origem,
                       item.gerais.destino,
                     );
-                    const statusCotacao =
-                      decisaoUI[chaveItem] ?? statusPorCotacao[chaveItem] ?? "pendente";
 
                     const statusColorClass =
                       statusCotacao === "aprovada"
