@@ -750,6 +750,20 @@ function Index() {
               );
             })()}
 
+            {isApprover && (() => {
+              const reprovada =
+                statusDe(idAtual, gerais.cliente, gerais.origem, gerais.destino) === "reprovada";
+              return (
+                <button
+                  type="button"
+                  disabled={enviando}
+                  onClick={() => decidirLocal(gerais, cards, "reprovada", idAtual)}
+                  className={`rounded-[7px] border border-danger bg-panel px-4 py-2.5 text-[13px] font-bold text-danger transition-colors hover:bg-danger hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60 ${marcaDagua(reprovada)}`}
+                >
+                  <X className="mr-2 inline h-4 w-4 align-[-3px]" />Reprovar
+                </button>
+              );
+            })()}
 
             {isApprover && (
               <>
