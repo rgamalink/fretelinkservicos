@@ -374,7 +374,14 @@ function Index() {
     }
     setEnviando(true);
     try {
-      await submeterAprovacao(g, c, "pendente", cotacaoId);
+      const chaveDup = chaveSub(g.cliente, g.origem, g.destino);
+      const existente = submissoes.find(
+        (s) =>
+          s.status === "pendente" &&
+          ((cotacaoId && s.ref_local === cotacaoId) ||
+            chaveSub(s.cliente, s.origem, s.destino) === chaveDup),
+      );
+      await submeterAprovacao(g, c, "pendente", cotacaoId, existente?.id);
       if (isApprover && !cotacaoId) salvarCotacao(g, c);
       setSubmetidas((prev) => ({ ...prev, [chave]: true }));
       toast.success(
@@ -405,7 +412,13 @@ function Index() {
       for (const item of itens) {
         if (!item.gerais.cliente.trim()) continue;
         try {
-          await submeterAprovacao(item.gerais, item.cards, "pendente", item.id);
+          const chaveDup = chaveSub(item.gerais.cliente, item.gerais.origem, item.gerais.destino);
+          const existente = submissoes.find(
+            (s) =>
+              s.status === "pendente" &&
+              (s.ref_local === item.id || chaveSub(s.cliente, s.origem, s.destino) === chaveDup),
+          );
+          await submeterAprovacao(item.gerais, item.cards, "pendente", item.id, existente?.id);
           setSubmetidas((prev) => ({ ...prev, [item.id]: true }));
           ok++;
         } catch {

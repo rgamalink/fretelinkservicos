@@ -26,12 +26,13 @@ export async function submeterAprovacao(
   cards: Record<number, DadosCard>,
   status: SubmissaoStatus = "pendente",
   refLocal?: string,
+  existingId?: string,
 ) {
   const { data: userData, error: userError } = await supabase.auth.getUser();
   const user = userData.user;
   if (userError || !user) throw new Error("Sessão expirada. Entre novamente.");
 
-  const { error } = await supabase.from("cotacoes_aprovacao").insert({
+  const payload = {
     user_id: user.id,
     submitted_by_email: user.email ?? null,
     ref_local: refLocal ?? null,
@@ -45,7 +46,21 @@ export async function submeterAprovacao(
     ...(status === "pendente"
       ? {}
       : { decided_at: new Date().toISOString(), decided_by: user.id }),
-  });
+  };
+
+  // Se já existe uma submissão pendente para a mesma cotação, atualiza-a em
+  // vez de inserir outra linha — evita duplicatas reaparecendo na fila de
+  // aprovação a cada reenvio.
+  if (existingId) {
+    const { error } = await supabase
+      .from("cotacoes_aprovacao")
+      .update(payload)
+      .eq("id", existingId);
+    if (error) throw error;
+    return;
+  }
+
+  const { error } = await supabase.from("cotacoes_aprovacao").insert(payload);
   if (error) throw error;
 }
 
